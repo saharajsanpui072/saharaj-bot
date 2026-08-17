@@ -178,7 +178,7 @@ user_action_state = {}
 admin_action_state = {}
 authenticated_admins = set()
 
-# ================= USER BOT LOGIC =================
+# ================= USER BOT UI & HANDLERS =================
 def generate_user_keypad(amount_str):
     text = (
         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -343,7 +343,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode="Markdown"
         )
 
-        # Notify Admin via Direct API
         try:
             admin_notif_text = (
                 "🔔 **NEW DEPOSIT REQUEST**\n"
@@ -469,7 +468,7 @@ async def user_callback_router(update: Update, context: ContextTypes.DEFAULT_TYP
             pass
         return
 
-    # Purchase Plan Handler with Async Non-blocking API
+    # Direct Buy Logic with API call
     if data.startswith("buy_"):
         duration = data.replace("buy_", "").strip()
         prices = get_prices()
@@ -504,7 +503,7 @@ async def user_callback_router(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.edit_message_text(insufficient_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             return
 
-        # 1. HOLD FUNDS
+        # 1. Hold Funds
         temp_balance = current_balance - cost
         c.execute("UPDATE users SET balance = ? WHERE user_id = ?", (temp_balance, user_id))
         conn.commit()
@@ -512,7 +511,7 @@ async def user_callback_router(update: Update, context: ContextTypes.DEFAULT_TYP
 
         await query.edit_message_text(f"⏳ **Processing `{duration}` Key from API...**", parse_mode="Markdown")
 
-        # 2. ASYNC API EXECUTION
+        # 2. Call API
         payload = {
             "api_key": API_KEY,
             "action": "buy",
@@ -557,7 +556,7 @@ async def user_callback_router(update: Update, context: ContextTypes.DEFAULT_TYP
                 ]
                 await query.edit_message_text(success_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             else:
-                # 3. AUTO-REFUND ON API REJECT / MAINTENANCE
+                # 3. Auto Refund
                 conn = get_db()
                 c = conn.cursor()
                 c.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (cost, user_id))
@@ -569,7 +568,6 @@ async def user_callback_router(update: Update, context: ContextTypes.DEFAULT_TYP
                 keyboard = [[InlineKeyboardButton("🔙 Back to Store", callback_data="open_store")]]
                 await query.edit_message_text(fail_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
         except Exception as e:
-            # AUTO-REFUND ON TIMEOUT
             conn = get_db()
             c = conn.cursor()
             c.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (cost, user_id))
@@ -577,7 +575,7 @@ async def user_callback_router(update: Update, context: ContextTypes.DEFAULT_TYP
             conn.close()
             await query.edit_message_text(f"❌ **Connection Error:** Server timed out.\n💰 `₹{cost:.2f}` refunded to your wallet.")
 
-# ================= ADMIN BOT LOGIC =================
+# ================= ADMIN BOT UI & HANDLERS =================
 def generate_admin_keypad(current_val, header_title, is_search=False):
     prefix = "Search: " if is_search else "Amount: ₹"
     sub = "Type / Paste in chat or use numeric buttons:" if is_search else "Min: ₹1.00 | Max: ₹50,000.00"
@@ -1046,32 +1044,44 @@ async def admin_callback_router(update: Update, context: ContextTypes.DEFAULT_TY
         keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="admin_main_menu")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# ================= ASYNC RUNNERS =================
-def run_admin_worker():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    app = Application.builder().token(ADMIN_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", admin_start))
-    app.add_handler(CallbackQueryHandler(admin_callback_router))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_msg))
-    app.run_polling(drop_pending_updates=True)
+# ================= ASYNC UNIFIED RUNNER (CORRECTED) =================
+async def run_unified_system():
+    init_db()
 
-def run_main_worker():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    app = Application.builder().token(MAIN_BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", user_start))
-    app.add_handler(CallbackQueryHandler(user_callback_router))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
-    app.run_polling(drop_pending_updates=True)
+    # Create Main Application
+    main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
+    main_app.add_handler(CommandHandler("start", user_start))
+    main_app.add_handler(CallbackQueryHandler(user_callback_router))
+    main_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_message))
+
+    # Create Admin Application
+    admin_app = Application.builder().token(ADMIN_BOT_TOKEN).build()
+    admin_app.add_handler(CommandHandler("start", admin_start))
+    admin_app.add_handler(CallbackQueryHandler(admin_callback_router))
+    admin_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_admin_msg))
+
+    # Initialize both
+    await main_app.initialize()
+    await admin_app.initialize()
+
+    # Start both
+    await main_app.start()
+    await admin_app.start()
+
+    # Start update pollers concurrently without thread collisions
+    await main_app.updater.start_polling(drop_pending_updates=True)
+    await admin_app.updater.start_polling(drop_pending_updates=True)
+
+    print("🚀 Unified Bot Engine Running Smoothly!")
+
+    # Keep async event loop alive
+    while True:
+        await asyncio.sleep(1000)
 
 def main():
-    init_db()
     threading.Thread(target=run_web, daemon=True).start()
     threading.Thread(target=keep_alive_ping, daemon=True).start()
-    threading.Thread(target=run_admin_worker, daemon=True).start()
-    print("🚀 Fixed Bots Running...")
-    run_main_worker()
+    asyncio.run(run_unified_system())
 
 if __name__ == "__main__":
     main()
